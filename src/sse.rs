@@ -8,7 +8,7 @@ use axum::{
 use futures::stream;
 use futures::stream::Stream;
 use std::convert::Infallible;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::broadcast};
 use axum::serve;
 use tokio::sync::broadcast::Sender;
 use std::net::SocketAddr;
@@ -20,7 +20,8 @@ pub struct SseHandler{
 }
 
 impl SseHandler {
-    pub fn new(sender: Sender<String>) -> Self {
+    pub fn new() -> Self {
+        let (sender, _) = broadcast::channel::<String>(100);
         SseHandler { sender }
     }
 
