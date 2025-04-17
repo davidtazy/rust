@@ -1,89 +1,53 @@
-use tokio::sync::mpsc;
+mod sse;
+mod input;
+mod business;
 
-use tokio::sync::oneshot;
-/// Provided by the requester and used by the manager task to send
-/// the command response back to the requester.
-type Responder<T> = oneshot::Sender<mini_redis::Result<T>>;
+use business::{Publisher, Transformer, UpperCaseTransformer};
+use input::input_task;
+
+use tokio::time::sleep;
+use tokio::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() {
-    // Create a new channel with a capacity of at most 32.
-    let (tx, mut rx) = mpsc::channel(32);
 
-    // The `Sender` handles are moved into the tasks. As there are two
-    // tasks, we need a second `Sender`.
-    let tx2 = tx.clone();
+    let (broadcast, _) = broadcast::channel::<String>(100);
 
-    // Spawn two tasks, one gets a key, the other sets a key
-    let t1 = tokio::spawn(async move {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let cmd = Command::Get {
-            key: "foo".to_string(),
-            resp: resp_tx,
-        };
+    
+    let transformer = Arc::new(UpperCaseTransformer);
+    
+    let input_receiver = input_task();
 
-        // Send the GET request
-        tx.send(cmd).await.unwrap();
+    let sse = Arc::new( sse::SseHandler::new(broadcast.clone()));
+    
+     business_logic_task(input_receiver, transformer,sse.clone());
+    
+    
+    
+    sse.sse_task();
 
-        // Await the response
-        let res = resp_rx.await;
-        println!("GOT = {:?}", res);
-    });
+    loop {
+        sleep(Duration::from_secs(1)).await;
+    }
+}
 
-    let t2 = tokio::spawn(async move {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let cmd = Command::Set {
-            key: "foo".to_string(),
-            val: "bar".into(),
-            resp: resp_tx,
-        };
+fn business_logic_task(mut input: mpsc::Receiver<String>, transformer: Arc<dyn Transformer>,publisher: Arc<dyn Publisher>)  {
 
-        tx2.send(cmd).await.unwrap();
+    
 
-        // Await the response
-        let res = resp_rx.await;
-        println!("GOT = {:?}", res);
-    });
+    tokio::spawn(async move {
 
-    use mini_redis::client;
-    // The `move` keyword is used to **move** ownership of `rx` into the task.
-    let manager = tokio::spawn(async move {
-        // Establish a connection to the server
-        let mut client = client::connect("127.0.0.1:6379").await.unwrap();
+        let dispatcher = business::Dispatcher::new(
+            publisher,       
+        );
 
-        // Start receiving messages
-        while let Some(cmd) = rx.recv().await {
-            use Command::*;
-
-            match cmd {
-                Get { key, resp } => {
-                    let res = client.get(&key).await;
-                    let _ = resp.send(res);
-                }
-                Set { key, val, resp } => {
-                    let res = client.set(&key, val).await;
-                    let _ = resp.send(res);
-                }
-            }
+        while let Some(input) = input.recv().await {
+            let transformed = transformer.transform(&input);
+            dispatcher.dispatch(transformed); 
         }
     });
 
-    t1.await.unwrap();
-    t2.await.unwrap();
-    manager.await.unwrap();
-}
-
-use bytes::Bytes;
-
-#[derive(Debug)]
-enum Command {
-    Get {
-        key: String,
-        resp: Responder<Option<Bytes>>,
-    },
-    Set {
-        key: String,
-        val: Bytes,
-        resp: Responder<()>,
-    },
 }
